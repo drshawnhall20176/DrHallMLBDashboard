@@ -208,11 +208,12 @@ def batter_base_rates(season_stat: Dict, split_stat: Optional[Dict] = None,
 
 
 def batter_pa_probs(season_stat: Dict, park: Dict, opp_allowed: Optional[Dict] = None,
-                    split_stat: Optional[Dict] = None, xhr_pa: Optional[float] = None) -> Optional[np.ndarray]:
-    """Per-PA outcome distribution: matchup-, platoon-, and (optionally) Statcast-aware.
+                    split_stat: Optional[Dict] = None, xhr_pa: Optional[float] = None,
+                    weather_hr: float = 1.0) -> Optional[np.ndarray]:
+    """Per-PA outcome distribution: matchup-, platoon-, Statcast-, and weather-aware.
 
     Order: stabilized base rates (handedness + barrel-implied HR) -> odds-ratio vs the
-    pitcher -> park."""
+    pitcher -> park -> weather (temperature + wind on HR)."""
     base = batter_base_rates(season_stat, split_stat, xhr_pa)
     if base is None:
         return None
@@ -230,8 +231,8 @@ def batter_pa_probs(season_stat: Dict, park: Dict, opp_allowed: Optional[Dict] =
             scale = adj / nonhr
             p_1b *= scale; p_2b *= scale; p_3b *= scale
 
-    # Park adjustment.
-    p_hr *= park.get("hr", 1.0)
+    # Park, then weather (temperature + out-to-CF wind act on home runs).
+    p_hr *= park.get("hr", 1.0) * weather_hr
     p_3b *= park.get("hits", 1.0); p_2b *= park.get("hits", 1.0); p_1b *= park.get("hits", 1.0)
 
     probs = np.array([0.0, p_k, p_bb, p_1b, p_2b, p_3b, p_hr], dtype=np.float64)
@@ -256,13 +257,46 @@ def simulate_batter(probs: np.ndarray, exp_pa: float, sims: int, rng) -> Dict[st
 
 
 # ---- pitcher model ---------------------------------------------------------
-def project_pitcher(stat: Dict) -> Optional[Dict]:
+def lineup_k_bb_rates(stats_list: list) -> Optional[Dict]:
+    """Aggregate a lineup's per-PA strikeout and walk rates (shrunk toward league).
+
+    This is the symmetric input to the batter matchup: how often THIS lineup, as a group,
+    strikes out and walks. Used to make pitcher K/BB projections matchup-aware."""
+    tot_pa = tot_k = tot_bb = 0.0
+    for s in stats_list:
+        if not s:
+            continue
+        tot_pa += _f(s, "plateAppearances")
+        tot_k += _f(s, "strikeOuts")
+        tot_bb += _f(s, "baseOnBalls")
+    if tot_pa < 200:  # not enough lineup data to trust
+        return None
+    return {
+        "k": _shrink(tot_k, tot_pa, LG_RATE["k"], 300),
+        "bb": _shrink(tot_bb, tot_pa, LG_RATE["bb"], 300),
+    }
+
+
+def build_lineup_rate_map(rows: list) -> Dict:
+    """Map (game_label, team_name) -> that lineup's aggregate K/BB rates, for pitcher matchups."""
+    groups: Dict = {}
+    for r in rows:
+        key = (r.get("GameLabel"), r.get("Team"))
+        groups.setdefault(key, []).append(r.get("_stat"))
+    return {k: lineup_k_bb_rates(v) for k, v in groups.items()}
+
+
+def project_pitcher(stat: Dict, opp_lineup: Optional[Dict] = None) -> Optional[Dict]:
     """Project a STARTER's K / outs / walks. Returns None for non-starters or thin samples.
 
-    Three guards against the inflation bug:
+    Guards against the inflation bug:
       1. Starter gate: needs real starts, else it's a bullpen game/opener -> skip.
       2. Shrinkage: K and BB rates regress toward league average by batters faced.
       3. Clamps: expected counts capped at realistic ceilings as a backstop.
+
+    When opp_lineup (the opposing lineup's K/BB rates) is supplied, K and BB are made
+    matchup-aware via the odds-ratio method: a strikeout pitcher facing a whiff-prone
+    lineup projects for more Ks; facing a contact lineup, fewer.
     """
     bf = _f(stat, "battersFaced")
     ip = _parse_ip(stat.get("inningsPitched"))
@@ -271,20 +305,22 @@ def project_pitcher(stat: Dict) -> Optional[Dict]:
     bb = _f(stat, "baseOnBalls")
 
     # 1. Starter gate. A genuine probable starter has multiple starts and real innings.
-    #    A reliever/opener listed as "probable" should not get starter-volume props.
     if gs < 3 or ip < 15 or bf < 60:
         return None
 
     # Expected innings from this pitcher's own start length, bounded to realistic range.
     exp_ip = float(np.clip(ip / gs, 3.0, 7.0))
-    # Batters faced from a league-baseline rate (~4.3/IP), lightly nudged by the pitcher's
-    # own baserunner tendency but kept in a sane band so noise can't blow it up.
     bf_per_ip = float(np.clip(bf / ip if ip > 0 else 4.3, 3.9, 4.7))
     exp_bf = exp_ip * bf_per_ip
 
     # 2. Shrinkage: regress per-batter K and BB rates toward league average.
     k_rate = _shrink(so, bf, *LG_PITCHER["k"])
     bb_rate = _shrink(bb, bf, *LG_PITCHER["bb"])
+
+    # 2b. Matchup: combine with the opposing lineup's rates via odds-ratio.
+    if opp_lineup:
+        k_rate = odds_ratio(k_rate, opp_lineup["k"], LG_RATE["k"])
+        bb_rate = odds_ratio(bb_rate, opp_lineup["bb"], LG_RATE["bb"])
 
     # 3. Clamp expected counts to realistic ceilings (backstop against any residual noise).
     exp_k = float(min(k_rate * exp_bf, 0.45 * exp_bf))
@@ -355,13 +391,14 @@ def build_signals(rows: List[Dict], meta: List[Dict], sims: int = DEFAULT_SIMS,
             signals.append(_signal(player, team, game, market, side, line, p, arr.mean(),
                                    Opp=r.get("Opp Pitcher"), Lineup=r.get("Lineup")))
 
-    # Pitchers
+    # Pitchers (matchup-aware: each starter projected vs the opposing lineup's K/BB rates)
+    lineup_map = build_lineup_rate_map(rows)
     for m in meta:
         for pm, team, opp in ((m["home_pm"], m["home_name"], m["away_name"]),
                               (m["away_pm"], m["away_name"], m["home_name"])):
             if pm.id is None or not pm.stat:
                 continue
-            proj = project_pitcher(pm.stat)
+            proj = project_pitcher(pm.stat, lineup_map.get((m["label"], opp)))
             if not proj:
                 continue
             sim = simulate_pitcher(proj, sims, rng)
@@ -426,7 +463,7 @@ def build_projection_index(rows: List[Dict], meta: List[Dict],
         park = PARK_FACTORS.get(r.get("_venue_id"), NEUTRAL_PARK)
         opp_allowed = pitcher_allowed_rates(r.get("_opp_stat"))
         xhr = xhr_from_statcast(r.get("_pid"), statcast, statcast_k)
-        probs = batter_pa_probs(stat, park, opp_allowed, r.get("_split_stat"), xhr)
+        probs = batter_pa_probs(stat, park, opp_allowed, r.get("_split_stat"), xhr, r.get("_weather_hr", 1.0))
         if probs is None:
             continue
         sim = simulate_batter(probs, r.get("_exp_pa", DEFAULT_UNKNOWN_PA), sims, rng)
@@ -437,12 +474,13 @@ def build_projection_index(rows: List[Dict], meta: List[Dict],
                          ("batter_hits", sim["hits"]), ("batter_strikeouts", sim["k"])):
             index[(nm, key)] = {"dist": _dist(arr), "mean": float(arr.mean()), "ctx": ctx}
 
+    lineup_map = build_lineup_rate_map(rows)
     for m in meta:
         for pm, team, opp in ((m["home_pm"], m["home_name"], m["away_name"]),
                               (m["away_pm"], m["away_name"], m["home_name"])):
             if pm.id is None or not pm.stat:
                 continue
-            proj = project_pitcher(pm.stat)
+            proj = project_pitcher(pm.stat, lineup_map.get((m["label"], opp)))
             if not proj:
                 continue
             sim = simulate_pitcher(proj, sims, rng)
@@ -504,7 +542,7 @@ def xhr_from_statcast(pid, statcast: Optional[Dict], k: Optional[float]) -> Opti
 def enrich_hitter_rows(rows: List[Dict], sims: int = DEFAULT_SIMS, seed: Optional[int] = None,
                        statcast: Optional[Dict] = None, statcast_k: Optional[float] = None) -> List[Dict]:
     """Attach matchup-aware model probabilities to each hitter row in place:
-    HR%, Hit% (>=1), TB1.5% (>1.5 total bases), xK% (>=1 strikeout).
+    HR%, Hit% (>=1), TB1.5% (>1.5 total bases), SO Prob (>=1 strikeout).
 
     When a Statcast lookup is supplied, HR regresses toward the barrel-implied rate and
     extra columns are added: Barrel%, xHR/PA, and Due (xHR minus actual HR rate = positive-
@@ -517,14 +555,14 @@ def enrich_hitter_rows(rows: List[Dict], sims: int = DEFAULT_SIMS, seed: Optiona
         park = PARK_FACTORS.get(r.get("_venue_id"), NEUTRAL_PARK)
         opp_allowed = pitcher_allowed_rates(r.get("_opp_stat"))
         xhr = xhr_from_statcast(r.get("_pid"), statcast, statcast_k)
-        probs = batter_pa_probs(stat, park, opp_allowed, r.get("_split_stat"), xhr)
+        probs = batter_pa_probs(stat, park, opp_allowed, r.get("_split_stat"), xhr, r.get("_weather_hr", 1.0))
         if probs is None:
             continue
         sim = simulate_batter(probs, r.get("_exp_pa", DEFAULT_UNKNOWN_PA), sims, rng)
         r["HR%"] = float(np.mean(sim["hr"] >= 1))
         r["Hit%"] = float(np.mean(sim["hits"] >= 1))
         r["TB1.5%"] = float(np.mean(sim["tb"] > 1.5))
-        r["xK%"] = float(np.mean(sim["k"] >= 1))
+        r["SO Prob"] = float(np.mean(sim["k"] >= 1))
         if xhr is not None:
             sc = statcast.get(r.get("_pid")) or {}
             actual_hr_pa = _f(stat, "homeRuns") / max(_f(stat, "plateAppearances"), 1)
@@ -532,3 +570,145 @@ def enrich_hitter_rows(rows: List[Dict], sims: int = DEFAULT_SIMS, seed: Optiona
             r["xHR/PA"] = xhr
             r["Due"] = xhr - actual_hr_pa   # positive = hitting better than HR results show
     return rows
+
+
+def build_pitcher_projection_rows(rows: List[Dict], meta: List[Dict],
+                                  sims: int = DEFAULT_SIMS, seed: Optional[int] = None) -> List[Dict]:
+    """Matchup-aware starter projections for the Pitching Lab: expected IP/K/BB/outs plus
+    the strikeout-over probability and fair odds at the default line."""
+    rng = np.random.default_rng(seed)
+    lineup_map = build_lineup_rate_map(rows)
+    out: List[Dict] = []
+    for m in meta:
+        for pm, team, opp in ((m["home_pm"], m["home_name"], m["away_name"]),
+                              (m["away_pm"], m["away_name"], m["home_name"])):
+            if pm.id is None or not pm.stat:
+                continue
+            opp_rates = lineup_map.get((m["label"], opp))
+            proj = project_pitcher(pm.stat, opp_rates)
+            if not proj:
+                continue
+            sim = simulate_pitcher(proj, sims, rng)
+            k_line = DEFAULT_LINES["Pitcher Strikeouts"]
+            k_over = float(np.mean(sim["k"] > k_line))
+            outs_over = float(np.mean(sim["outs"] > DEFAULT_LINES["Pitcher Outs"]))
+            bb_over = float(np.mean(sim["bb"] > DEFAULT_LINES["Pitcher Walks"]))
+            out.append({
+                "Pitcher": pm.name, "Team": team, "Opp": opp, "Hand": pm.hand,
+                "ERA": round(pm.era, 2), "FIP": pm.fip,
+                "Proj IP": round(proj["exp_ip"], 1), "Proj K": round(proj["exp_k"], 1),
+                "Proj BB": round(proj["exp_bb"], 1), "Proj Outs": round(proj["exp_outs"], 1),
+                "K line": k_line, "K over%": round(k_over, 4), "K fair": prob_to_american(k_over),
+                "Outs over%": round(outs_over, 4), "BB over%": round(bb_over, 4),
+                "_opp_k": (opp_rates or {}).get("k"), "_opp_bb": (opp_rates or {}).get("bb"),
+                "_game": m["label"],
+            })
+    out.sort(key=lambda r: r["Proj K"], reverse=True)
+    return out
+
+
+# ===========================================================================
+# BEST BETS — cross-market synthesis with transparent reasoning
+# ===========================================================================
+# Typical single-game over-probability at the default line for each market. "Conviction"
+# is the model's probability for the favored side divided by this reference, so a play
+# scores high only when the model diverges from a typical prop of that type. This is a
+# CONVICTION measure, not expected value — true value needs the live price (Edge Board).
+BEST_BET_REF = {
+    "Batter HR": 0.11, "Batter Total Bases": 0.42, "Batter Total Hits": 0.65,
+    "Batter Strikeouts": 0.62, "Pitcher Strikeouts": 0.50, "Pitcher Outs": 0.50,
+    "Pitcher Walks": 0.45,
+}
+
+
+def _favored_side(prob_over: float, ref: float):
+    """Return (side, prob_of_that_side, ref_for_that_side)."""
+    if prob_over >= ref:
+        return "Over", prob_over, ref
+    return "Under", 1.0 - prob_over, 1.0 - ref
+
+
+def _hitter_reasons(r: Dict, market: str, side: str) -> List[str]:
+    why = []
+    offense = market in ("Batter HR", "Batter Total Bases", "Batter Total Hits")
+    if side == "Over" and offense and r.get("Advantage") == "Advantage":
+        why.append(f"platoon edge ({r.get('Hand')} bat vs {r.get('Opp Hand')}HP)")
+    if market in ("Batter HR", "Batter Total Bases") and (r.get("_weather_hr") or 1.0) >= 1.05:
+        why.append(f"weather aiding power (+{(r['_weather_hr'] - 1) * 100:.0f}%)")
+    if market == "Batter HR" and (r.get("Due") or 0) > 0.01:
+        why.append("barrels imply more power than the HR count shows")
+    if market == "Batter Strikeouts":
+        why.append("elevated whiff risk in this matchup" if side == "Over"
+                   else "strong contact profile (rarely strikes out)")
+    if not why:
+        why.append(f"model leans {side} of a typical line here")
+    return why
+
+
+def _pitcher_reasons(r: Dict, market: str, side: str) -> List[str]:
+    why, opp_k, opp_bb = [], r.get("_opp_k"), r.get("_opp_bb")
+    if market == "Pitcher Strikeouts":
+        if side == "Over":
+            if opp_k and opp_k > 0.23:
+                why.append(f"{r['Opp']} whiff-prone ({opp_k * 100:.0f}% K rate)")
+            why.append(f"projects {r.get('Proj K')} K")
+        else:
+            if opp_k and opp_k < 0.20:
+                why.append(f"{r['Opp']} tough to strike out ({opp_k * 100:.0f}% K rate)")
+            why.append(f"projects only {r.get('Proj K')} K")
+    elif market == "Pitcher Walks":
+        if side == "Over" and opp_bb and opp_bb > 0.09:
+            why.append(f"{r['Opp']} patient lineup ({opp_bb * 100:.0f}% walk rate)")
+        why.append(f"projects {r.get('Proj BB')} BB")
+    elif market == "Pitcher Outs":
+        why.append(f"projects {r.get('Proj IP')} IP ({r.get('Proj Outs')} outs)")
+    if not why:
+        why.append(f"model leans {side} of a typical line here")
+    return why
+
+
+def build_best_bets(hitter_rows: List[Dict], pitcher_rows: List[Dict]) -> List[Dict]:
+    """Rank model candidate plays across all markets by conviction (model prob vs the
+    market-typical prob for that prop), each with transparent reasoning. No odds required.
+
+    These are the model's strongest LEANS, not guaranteed value — check the live price on
+    the Edge Board and let the proof layer (CLV/calibration) be the judge."""
+    plays: List[Dict] = []
+
+    batter_specs = [("Batter HR", "HR%", 0.5), ("Batter Total Bases", "TB1.5%", 1.5),
+                    ("Batter Total Hits", "Hit%", 0.5), ("Batter Strikeouts", "SO Prob", 0.5)]
+    for r in hitter_rows:
+        for market, col, line in batter_specs:
+            p = r.get(col)
+            if p is None:
+                continue
+            side, sp, ref_s = _favored_side(p, BEST_BET_REF[market])
+            if market == "Batter HR" and side == "Under":
+                continue  # "won't homer" isn't a real play
+            plays.append({
+                "Player": r["Hitter"], "Team": r["Team"], "Game": r["GameLabel"],
+                "Market": market, "Side": side, "Line": line,
+                "ModelProb": round(sp, 4), "Fair": prob_to_american(sp),
+                "Conviction": round(sp / ref_s, 2) if ref_s > 0 else 0.0,
+                "Why": "; ".join(_hitter_reasons(r, market, side)),
+            })
+
+    pitcher_specs = [("Pitcher Strikeouts", "K over%", DEFAULT_LINES["Pitcher Strikeouts"]),
+                     ("Pitcher Outs", "Outs over%", DEFAULT_LINES["Pitcher Outs"]),
+                     ("Pitcher Walks", "BB over%", DEFAULT_LINES["Pitcher Walks"])]
+    for r in pitcher_rows:
+        for market, col, line in pitcher_specs:
+            p = r.get(col)
+            if p is None:
+                continue
+            side, sp, ref_s = _favored_side(p, BEST_BET_REF[market])
+            plays.append({
+                "Player": r["Pitcher"], "Team": r["Team"], "Game": r.get("_game", ""),
+                "Market": market, "Side": side, "Line": line,
+                "ModelProb": round(sp, 4), "Fair": prob_to_american(sp),
+                "Conviction": round(sp / ref_s, 2) if ref_s > 0 else 0.0,
+                "Why": "; ".join(_pitcher_reasons(r, market, side)),
+            })
+
+    plays.sort(key=lambda x: x["Conviction"], reverse=True)
+    return plays

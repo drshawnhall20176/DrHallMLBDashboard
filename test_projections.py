@@ -156,6 +156,73 @@ def test_handedness_split_applies():
     assert abs(p_tiny[P.HR] - base[P.HR]) < 0.01
 
 
+def test_lineup_k_bb_rates():
+    whiff = [dict(plateAppearances=600, strikeOuts=180, baseOnBalls=45) for _ in range(9)]
+    rates = P.lineup_k_bb_rates(whiff)
+    assert 0.25 < rates["k"] < 0.32          # ~30% K lineup
+    # thin lineup data -> None (falls back to neutral)
+    assert P.lineup_k_bb_rates([dict(plateAppearances=10, strikeOuts=3, baseOnBalls=1)]) is None
+
+
+def test_pitcher_matchup_moves_strikeouts():
+    ace = dict(battersFaced=720, inningsPitched="180.0", gamesStarted=29, strikeOuts=235, baseOnBalls=42)
+    whiff = P.lineup_k_bb_rates([dict(plateAppearances=600, strikeOuts=180, baseOnBalls=45) for _ in range(9)])
+    contact = P.lineup_k_bb_rates([dict(plateAppearances=600, strikeOuts=90, baseOnBalls=45) for _ in range(9)])
+    k_vs_whiff = P.project_pitcher(ace, whiff)["exp_k"]
+    k_neutral = P.project_pitcher(ace)["exp_k"]
+    k_vs_contact = P.project_pitcher(ace, contact)["exp_k"]
+    assert k_vs_whiff > k_neutral > k_vs_contact
+
+
+def test_pitcher_matchup_moves_walks():
+    ace = dict(battersFaced=720, inningsPitched="180.0", gamesStarted=29, strikeOuts=235, baseOnBalls=42)
+    patient = P.lineup_k_bb_rates([dict(plateAppearances=600, strikeOuts=120, baseOnBalls=80) for _ in range(9)])
+    hacker = P.lineup_k_bb_rates([dict(plateAppearances=600, strikeOuts=120, baseOnBalls=25) for _ in range(9)])
+    assert P.project_pitcher(ace, patient)["exp_bb"] > P.project_pitcher(ace, hacker)["exp_bb"]
+
+
+def test_lineup_rate_map():
+    rows = [
+        {"GameLabel": "A @ B", "Team": "A", "_stat": dict(plateAppearances=600, strikeOuts=150, baseOnBalls=50)},
+        {"GameLabel": "A @ B", "Team": "A", "_stat": dict(plateAppearances=600, strikeOuts=120, baseOnBalls=60)},
+    ]
+    m = P.build_lineup_rate_map(rows)
+    assert ("A @ B", "A") in m
+    assert m[("A @ B", "A")] is None or "k" in m[("A @ B", "A")]
+
+
+def test_favored_side():
+    # over above reference -> Over; below -> Under (with complemented prob/ref)
+    assert P._favored_side(0.30, 0.11)[0] == "Over"
+    side, sp, refs = P._favored_side(0.30, 0.62)   # 30% over a 62% baseline -> Under is the lean
+    assert side == "Under" and abs(sp - 0.70) < 1e-9 and abs(refs - 0.38) < 1e-9
+
+
+def test_build_best_bets_ranks_and_reasons():
+    hitters = [
+        dict(Hitter="Slugger", Team="A", GameLabel="A @ B", Hand="L",
+             **{"Opp Hand": "R", "Opp Pitcher": "Ace"}, Advantage="Advantage",
+             _weather_hr=1.12, Due=0.03, **{"HR%": 0.22, "TB1.5%": 0.49, "Hit%": 0.70, "SO Prob": 0.55}),
+    ]
+    pitchers = [
+        dict(Pitcher="Whiff Ace", Team="B", Opp="A",
+             **{"K over%": 0.74, "Outs over%": 0.58, "BB over%": 0.30},
+             **{"Proj K": 9.2, "Proj BB": 1.6, "Proj IP": 6.2, "Proj Outs": 18.6},
+             _opp_k=0.265, _opp_bb=0.07, _game="A @ B"),
+    ]
+    plays = P.build_best_bets(hitters, pitchers)
+    assert plays, "should produce plays"
+    # sorted by conviction descending
+    convs = [p["Conviction"] for p in plays]
+    assert convs == sorted(convs, reverse=True)
+    # the slugger HR over should be the top conviction play and carry reasoning
+    top = plays[0]
+    assert top["Market"] == "Batter HR" and top["Side"] == "Over"
+    assert "platoon" in top["Why"] and "weather" in top["Why"]
+    # no "won't homer" plays
+    assert not any(p["Market"] == "Batter HR" and p["Side"] == "Under" for p in plays)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     passed = 0
