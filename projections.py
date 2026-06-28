@@ -601,7 +601,7 @@ def build_pitcher_projection_rows(rows: List[Dict], meta: List[Dict],
                 "K line": k_line, "K over%": round(k_over, 4), "K fair": prob_to_american(k_over),
                 "Outs over%": round(outs_over, 4), "BB over%": round(bb_over, 4),
                 "_opp_k": (opp_rates or {}).get("k"), "_opp_bb": (opp_rates or {}).get("bb"),
-                "_game": m["label"], "_pid": pm.id,
+                "_game": m["label"], "_pid": pm.id, "_game_date": m.get("game_date"),
             })
     out.sort(key=lambda r: r["Proj K"], reverse=True)
     return out
