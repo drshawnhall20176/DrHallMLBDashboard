@@ -410,3 +410,62 @@ def _hitter_row(raw: Dict, opp: PitcherMetrics, team_name: str,
         "_opp_stat": opp.stat,                       # opposing pitcher's season line (matchup)
         "_split_stat": (raw.get("vs_l") if opp.hand == "L" else raw.get("vs_r")),  # platoon split
     }
+
+
+# ---- actual results (for the retrospective) --------------------------------
+def _ip_to_outs(ip) -> int:
+    """Innings pitched string ('6.1') -> outs (19). '.1'/'.2' are 1/2 outs, not tenths."""
+    try:
+        whole, _, frac = str(ip).partition(".")
+        return int(whole or 0) * 3 + (int(frac) if frac in ("1", "2") else 0)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _parse_boxscore_results(box: Dict) -> Dict[int, Dict]:
+    """Per-player actuals from one boxscore, keyed by player id.
+
+    Batting: hr, hits, tb, so. Pitching: p_k, p_outs, p_bb. (A player may have both.)"""
+    out: Dict[int, Dict] = {}
+    for side in ("home", "away"):
+        players = (((box.get("teams", {}) or {}).get(side, {}) or {}).get("players", {}) or {})
+        for pdata in players.values():
+            pid = ((pdata.get("person", {}) or {}).get("id"))
+            if pid is None:
+                continue
+            name = (pdata.get("person", {}) or {}).get("fullName", "")
+            stats = pdata.get("stats", {}) or {}
+            rec = out.setdefault(int(pid), {"name": name})
+
+            bat = stats.get("batting", {}) or {}
+            if bat:
+                h = int(bat.get("hits", 0) or 0)
+                d = int(bat.get("doubles", 0) or 0)
+                t = int(bat.get("triples", 0) or 0)
+                hr = int(bat.get("homeRuns", 0) or 0)
+                singles = max(h - d - t - hr, 0)
+                rec.update(hr=hr, hits=h, tb=singles + 2 * d + 3 * t + 4 * hr,
+                           so=int(bat.get("strikeOuts", 0) or 0))
+
+            pit = stats.get("pitching", {}) or {}
+            if pit:
+                rec.update(p_k=int(pit.get("strikeOuts", 0) or 0),
+                           p_bb=int(pit.get("baseOnBalls", 0) or 0),
+                           p_outs=_ip_to_outs(pit.get("inningsPitched", "0.0")))
+    return out
+
+
+def get_player_results(date_str: str) -> Dict[int, Dict]:
+    """Actual per-player results for all FINAL games on a date, keyed by player id.
+    Empty for dates with no completed games."""
+    results: Dict[int, Dict] = {}
+    for g in get_schedule(date_str):
+        if "final" not in (g.get("status", "") or "").lower():
+            continue
+        try:
+            box = fetch_json(f"{BASE}/game/{g['gamePk']}/boxscore")
+        except Exception:
+            continue
+        for pid, rec in _parse_boxscore_results(box).items():
+            results.setdefault(pid, {}).update(rec)
+    return results
