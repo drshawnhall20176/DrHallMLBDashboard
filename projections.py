@@ -687,6 +687,8 @@ def build_best_bets(hitter_rows: List[Dict], pitcher_rows: List[Dict]) -> List[D
                 continue  # "won't homer" isn't a real play
             plays.append({
                 "Player": r["Hitter"], "PlayerId": r.get("_pid"), "Team": r["Team"], "Game": r["GameLabel"],
+                "Opp": r.get("Opp Pitcher"),
+                "Versus": r.get("Opp Pitcher"),
                 "Market": market, "Side": side, "Line": line,
                 "ModelProb": round(sp, 4), "Fair": prob_to_american(sp),
                 "Conviction": round(sp / ref_s, 2) if ref_s > 0 else 0.0,
@@ -704,6 +706,8 @@ def build_best_bets(hitter_rows: List[Dict], pitcher_rows: List[Dict]) -> List[D
             side, sp, ref_s = _favored_side(p, BEST_BET_REF[market])
             plays.append({
                 "Player": r["Pitcher"], "PlayerId": r.get("_pid"), "Team": r["Team"], "Game": r.get("_game", ""),
+                "Opp": r.get("Opp"),
+                "Versus": r.get("Opp"),
                 "Market": market, "Side": side, "Line": line,
                 "ModelProb": round(sp, 4), "Fair": prob_to_american(sp),
                 "Conviction": round(sp / ref_s, 2) if ref_s > 0 else 0.0,
@@ -712,3 +716,41 @@ def build_best_bets(hitter_rows: List[Dict], pitcher_rows: List[Dict]) -> List[D
 
     plays.sort(key=lambda x: x["Conviction"], reverse=True)
     return plays
+
+
+def curate_selections(plays: List[Dict], n: int = 6, max_per_market: int = 2,
+                      min_conviction: float = 1.15) -> List[Dict]:
+    """Pick a tight, market-diverse set of the most interesting plays for a media segment.
+
+    Takes the highest-conviction plays but caps how many come from any one market, so a
+    segment isn't eight home-run leans — it's a spread across the slate. `plays` should
+    already be sorted by conviction (build_best_bets returns them that way)."""
+    picked, per = [], {}
+    for p in plays:
+        if p["Conviction"] < min_conviction:
+            continue
+        m = p["Market"]
+        if per.get(m, 0) >= max_per_market:
+            continue
+        picked.append(p)
+        per[m] = per.get(m, 0) + 1
+        if len(picked) >= n:
+            break
+    return picked
+
+
+def curate_selections(plays: List[Dict], n: int = 6, per_market_cap: int = 2) -> List[Dict]:
+    """Pick a tight, VARIED set of the most interesting plays for a media segment.
+
+    Walks plays in conviction order but caps how many come from any one market, so a segment
+    isn't six home-run leans — it's a spread across HR, K, total bases, etc. Returns up to n."""
+    chosen, counts = [], {}
+    for p in sorted(plays, key=lambda x: x.get("Conviction", 0), reverse=True):
+        m = p.get("Market")
+        if counts.get(m, 0) >= per_market_cap:
+            continue
+        chosen.append(p)
+        counts[m] = counts.get(m, 0) + 1
+        if len(chosen) >= n:
+            break
+    return chosen
