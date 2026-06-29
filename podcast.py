@@ -122,13 +122,19 @@ def selection_beats(p: Dict) -> List[Dict]:
     push = _DEEZY_PUSH.get(p.get("Market"), "Break this one down for me, Doc.").format(prob=prob, inv=inv)
     opp = f" vs {p['Opp']}" if p.get("Opp") else ""
     fair = f"{p['Fair']:+d}" if p.get("Fair") is not None else "—"
+    if p.get("EV") is not None:
+        live = f"{p['LivePrice']:+d}" if p.get("LivePrice") is not None else "—"
+        price_beat = (f"Live price is {live} — that's about {p['EV']:+.1f}% value by our math. "
+                      f"Model has it ~{prob}%. That's a real edge at this number, not just a lean.")
+    else:
+        price_beat = (f"Fair price is around {fair}. Model has it ~{prob}% — a lean we like, not a "
+                      f"lock. We only fire if the live number beats {fair}.")
     return [
         _note(f"SELECTION: {p['Player']} ({p['Team']}) — {p['Market']} {p['Side']} {p['Line']:g}{opp}  "
               f"[conviction {p.get('Conviction', 0):.1f}x]"),
         _line("Dr. Hall", f"Here's the case: {p.get('Why', 'the model likes the matchup')}."),
         _line("Deezy", push),
-        _line("Dr. Hall", f"Fair price is around {fair}. Model has it ~{prob}% — that's a lean we like, "
-                          f"not a lock. We only fire if the live number beats {fair}."),
+        _line("Dr. Hall", price_beat),
         _note("Reality check (say it every time): interesting, not guaranteed. Check the price."),
     ]
 

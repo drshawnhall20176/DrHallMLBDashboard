@@ -739,13 +739,16 @@ def curate_selections(plays: List[Dict], n: int = 6, max_per_market: int = 2,
     return picked
 
 
-def curate_selections(plays: List[Dict], n: int = 6, per_market_cap: int = 2) -> List[Dict]:
+def curate_selections(plays: List[Dict], n: int = 6, per_market_cap: int = 2,
+                      rank_key: str = "Conviction") -> List[Dict]:
     """Pick a tight, VARIED set of the most interesting plays for a media segment.
 
-    Walks plays in conviction order but caps how many come from any one market, so a segment
-    isn't six home-run leans — it's a spread across HR, K, total bases, etc. Returns up to n."""
+    Walks plays in rank order (conviction by default, or 'EV' when live odds are on) but caps
+    how many come from any one market, so a segment isn't six home-run leans. Returns up to n."""
+    ranked = sorted(plays, key=lambda x: (x.get(rank_key) is not None, x.get(rank_key) or 0),
+                    reverse=True)
     chosen, counts = [], {}
-    for p in sorted(plays, key=lambda x: x.get("Conviction", 0), reverse=True):
+    for p in ranked:
         m = p.get("Market")
         if counts.get(m, 0) >= per_market_cap:
             continue
