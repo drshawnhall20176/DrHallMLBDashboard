@@ -6,6 +6,8 @@ top selections as banter beats, sleepers & fades, a rotating teaching segment, t
 plan, and a sign-off. Copy-pasteable as a complete show doc.
 """
 
+import os
+
 import streamlit as st
 from datetime import datetime, timedelta
 
@@ -13,8 +15,17 @@ import mlb_engine as E
 import projections as P
 import statcast_data as SC
 import weather as WX
+import odds_api as O
 import retro as R
 import podcast as PC
+import selections as SEL
+
+
+def get_key():
+    try:
+        return st.secrets["ODDS_API_KEY"]
+    except Exception:
+        return os.environ.get("ODDS_API_KEY")
 
 st.set_page_config(page_title="H2 Podcast Studio", page_icon="🎙️", layout="wide")
 
@@ -59,22 +70,35 @@ def _board(date_str):
         r["_weather_hr"] = w["hr_factor"] if w else 1.0
     P.enrich_hitter_rows(rows, seed=7, statcast=sc, statcast_k=k)
     pr = P.build_pitcher_projection_rows(rows, meta, seed=11)
-    return P.build_best_bets(rows, pr), len(meta)
+    return P.build_best_bets(rows, pr), len(meta), rows, meta, sc, k
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_today(date_str):
-    plays, n_games = _board(date_str)
-    headliners = P.curate_selections(plays, n=5, per_market_cap=2)
+def load_today(date_str, ev_mode):
+    plays, n_games, rows, meta, sc, k = _board(date_str)
+    plays = SEL.filter_known_pitcher(plays)             # never headline a TBD-pitcher matchup
+    ev_used = False
+    if ev_mode:
+        key = get_key()
+        if key:
+            index = P.build_projection_index(rows, meta, statcast=sc, statcast_k=k)
+            markets = sorted(set(SEL.MARKET_TO_ODDS_KEY.values()))
+            offers, _ = O.fetch_slate_props(date_str, key, markets)
+            edges, _ = O.compute_edges(index, offers)
+            SEL.attach_live_ev(plays, edges)
+            plays = [p for p in plays if p.get("EV") is not None]
+            ev_used = True
+    rank = "EV" if ev_used else "Conviction"
+    headliners = P.curate_selections(plays, n=5, per_market_cap=2, rank_key=rank)
     hl = {id(p) for p in headliners}
-    sleepers = P.curate_selections([p for p in plays if id(p) not in hl], n=3, per_market_cap=1)
-    return headliners, sleepers, n_games
+    sleepers = P.curate_selections([p for p in plays if id(p) not in hl], n=3, per_market_cap=1, rank_key=rank)
+    return headliners, sleepers, n_games, ev_used
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def load_yesterday(date_str):
     try:
-        plays, _ = _board(date_str)
+        plays, *_ = _board(date_str)
         results = E.get_player_results(date_str)
         _, summary = R.grade_slate(plays, results)
         caught = R.homer_report(plays, results)["caught"]
@@ -84,11 +108,15 @@ def load_yesterday(date_str):
 
 
 target = st.date_input("Show date (tonight's slate)", datetime.now())
+ev_mode = st.toggle("Feature live-value plays (uses odds quota)", value=False,
+                    help="On: ranks the show's selections by real EV% against live prices (same math "
+                         "as the Edge Board). Off: ranks by model conviction. Either way, TBD-pitcher "
+                         "plays are excluded.")
 date_str = target.strftime("%Y-%m-%d")
 yest = (target - timedelta(days=1)).strftime("%Y-%m-%d")
 
 with st.spinner("Writing tonight's rundown..."):
-    headliners, sleepers, n_games = load_today(date_str)
+    headliners, sleepers, n_games, ev_used = load_today(date_str, ev_mode)
     retro, caught = load_yesterday(yest)
 
 if not headliners:
