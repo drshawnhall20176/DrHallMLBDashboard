@@ -1,16 +1,16 @@
 """
 Podcast Studio — a full ~hour show rundown for Dr. Hall & Deezy, regenerated daily.
-
+ 
 Opens with Yesterday in Review (real results + fill-in chaos prompts), then slate overview,
 top selections as banter beats, sleepers & fades, a rotating teaching segment, the honest game
 plan, and a sign-off. Copy-pasteable as a complete show doc.
 """
-
+ 
 import os
-
+ 
 import streamlit as st
 from datetime import datetime, timedelta
-
+ 
 import mlb_engine as E
 import projections as P
 import statcast_data as SC
@@ -19,16 +19,16 @@ import odds_api as O
 import retro as R
 import podcast as PC
 import selections as SEL
-
-
+ 
+ 
 def get_key():
     try:
         return st.secrets["ODDS_API_KEY"]
     except Exception:
         return os.environ.get("ODDS_API_KEY")
-
+ 
 st.set_page_config(page_title="H2 Podcast Studio", page_icon="🎙️", layout="wide")
-
+ 
 st.markdown("""
 <style>
 .beat-line {margin:3px 0;font-size:14px;color:#0f172a;}
@@ -39,16 +39,16 @@ st.markdown("""
 .sec-time {color:#94a3b8;font-size:13px;font-weight:normal;}
 </style>
 """, unsafe_allow_html=True)
-
+ 
 st.title("🎙️ H2 Podcast Studio")
 st.caption("A full ~hour show rundown for Dr. Hall & Deezy — rebuilt every day from the slate")
-
-
+ 
+ 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_statcast():
     return SC.load()
-
-
+ 
+ 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_weather(keys):
     out = {}
@@ -59,8 +59,8 @@ def load_weather(keys):
             except Exception:
                 out[vid] = None
     return out
-
-
+ 
+ 
 def _board(date_str):
     rows, meta = E.build_slate(date_str)
     sc, k = load_statcast()
@@ -71,8 +71,8 @@ def _board(date_str):
     P.enrich_hitter_rows(rows, seed=7, statcast=sc, statcast_k=k)
     pr = P.build_pitcher_projection_rows(rows, meta, seed=11)
     return P.build_best_bets(rows, pr), len(meta), rows, meta, sc, k
-
-
+ 
+ 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_today(date_str, ev_mode):
     plays, n_games, rows, meta, sc, k = _board(date_str)
@@ -93,8 +93,8 @@ def load_today(date_str, ev_mode):
     hl = {id(p) for p in headliners}
     sleepers = P.curate_selections([p for p in plays if id(p) not in hl], n=3, per_market_cap=1, rank_key=rank)
     return headliners, sleepers, n_games, ev_used
-
-
+ 
+ 
 @st.cache_data(ttl=900, show_spinner=False)
 def load_yesterday(date_str):
     try:
@@ -105,8 +105,8 @@ def load_yesterday(date_str):
         return summary, caught
     except Exception:
         return None, None
-
-
+ 
+ 
 target = st.date_input("Show date (tonight's slate)", datetime.now())
 ev_mode = st.toggle("Feature live-value plays (uses odds quota)", value=False,
                     help="On: ranks the show's selections by real EV% against live prices (same math "
@@ -114,23 +114,23 @@ ev_mode = st.toggle("Feature live-value plays (uses odds quota)", value=False,
                          "plays are excluded.")
 date_str = target.strftime("%Y-%m-%d")
 yest = (target - timedelta(days=1)).strftime("%Y-%m-%d")
-
+ 
 with st.spinner("Writing tonight's rundown..."):
     headliners, sleepers, n_games, ev_used = load_today(date_str, ev_mode)
     retro, caught = load_yesterday(yest)
-
+ 
 if not headliners:
     st.info("No games on this date to build a show around. Pick a date with a scheduled slate.")
     st.stop()
-
+ 
 sections = PC.assemble_script(date_str, headliners, sleepers, retro, caught)
-
+ 
 st.caption(f"{n_games} games tonight · {len(headliners)} headline selections · "
            f"{len(sleepers)} sleepers · teaching + yesterday's review included")
 st.info("This is a talking-points rundown — riff, don't read. Yellow blocks are **FILL IN** prompts "
         "for the stuff only you two know (last night's chaos, tonight's storyline). The model never "
         "makes up game news it can't verify.", icon="🎬")
-
+ 
 # --- render sections on screen ---------------------------------------------
 for sec in sections:
     st.markdown(f"### {sec['title']} <span class='sec-time'>· {sec['time']}</span>", unsafe_allow_html=True)
@@ -142,7 +142,7 @@ for sec in sections:
         else:
             st.markdown(f"<div class='beat-line'><b>{b['who']}:</b> {b['text']}</div>", unsafe_allow_html=True)
     st.markdown("")
-
+ 
 # --- full copy-paste show doc ----------------------------------------------
 st.divider()
 st.subheader("📋 Full show doc — copy for the studio")
