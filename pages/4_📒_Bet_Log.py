@@ -42,14 +42,21 @@ with st.expander("➕ Log a bet", expanded=False):
             model_prob = st.number_input("Model prob", min_value=0.0, max_value=1.0, value=0.55, step=0.01,
                                          help="The model's probability for this side, from the Edge Board.")
             stake = st.number_input("Stake ($)", min_value=0.0, value=2.50, step=0.5)
-        book = st.text_input("Book", placeholder="fanduel")
+        col_b, col_t = st.columns(2)
+        with col_b:
+            book = st.text_input("Book", placeholder="fanduel")
+        with col_t:
+            ticket = st.text_input("Parlay ticket (optional)", placeholder="e.g. Parlay 6/28 #1",
+                                   help="Give every leg of the same parlay the SAME tag to group them. "
+                                        "Leave blank for a straight single.")
         notes = st.text_input("Notes", placeholder="optional")
         if st.form_submit_button("Log bet", type="primary"):
             if player and game:
                 B.add_bet(slate_date=d.isoformat(), game=game, player=player, market=market,
                           side=side, line=line, entry_odds=int(entry_odds), model_prob=model_prob,
-                          stake=stake, book=book, notes=notes)
-                st.success(f"Logged: {player} {market} {side} {line}")
+                          stake=stake, book=book, notes=notes, ticket=ticket.strip())
+                st.success(f"Logged: {player} {market} {side} {line}"
+                           + (f"  ·  ticket “{ticket.strip()}”" if ticket.strip() else ""))
             else:
                 st.warning("Player and game are required.")
 
@@ -130,6 +137,44 @@ if cal:
 else:
     st.caption("No settled bets yet — settle some above to build the calibration curve.")
 
+# --- Parlay vs straight bets -----------------------------------------------
+st.divider()
+st.subheader("🎫 Parlay vs straight bets")
+tickets = B.group_tickets(bets)
+multi = {t: legs for t, legs in tickets.items() if len(legs) > 1}
+if not multi:
+    st.caption("Tag the legs of a parlay with the same ticket name (in the log form above) and "
+               "this compares the parlay to betting the same money as straight singles.")
+else:
+    st.caption("For each parlay, this shows what it paid (or lost) versus betting the **same total "
+               "money** as straight singles, split evenly across the legs. The honest lesson, in dollars.")
+    pick = st.selectbox("Ticket", sorted(multi.keys()))
+    legs = multi[pick]
+    default_stake = round(sum(L.get("stake") or 0 for L in legs), 2) or 10.0
+    pstake = st.number_input("What you risked on this parlay ($)", min_value=0.5,
+                             value=float(default_stake), step=0.5)
+    cmp = B.compare_parlay_vs_singles(legs, pstake)
+    if cmp:
+        a, b = st.columns(2)
+        a.metric(f"Parlay ({cmp['parlay_american']:+d})" if cmp["parlay_american"] else "Parlay",
+                 f"${cmp['parlay_pnl']:+.2f}" if cmp["parlay_pnl"] is not None else "pending",
+                 help=f"All {cmp['n']} legs must hit. Status: {cmp['status']}")
+        b.metric(f"Same ${cmp['parlay_stake']:.0f} as singles",
+                 f"${cmp['singles_pnl']:+.2f}" if cmp["singles_pnl"] is not None else "pending",
+                 delta=f"{cmp['difference']:+.2f} vs parlay" if cmp["difference"] is not None else None,
+                 help=f"${cmp['per_leg_stake']:.2f} on each leg as a straight bet")
+        if cmp["difference"] is not None:
+            if cmp["difference"] > 0:
+                st.success(f"Straight singles would have returned **${cmp['difference']:+.2f} more** "
+                           f"than the parlay on this ticket.")
+            else:
+                st.info(f"This time the parlay beat singles by **${-cmp['difference']:.2f}** — the "
+                        f"upside case, when every leg hits. It's the rarer outcome.")
+        legdf = pd.DataFrame(cmp["legs"])
+        legdf["as single"] = legdf["pnl"].apply(lambda v: f"${v:+.2f}" if v is not None else "—")
+        st.dataframe(legdf[["player", "market", "side", "line", "entry_odds", "result", "as single"]],
+                     hide_index=True, use_container_width=True)
+
 # --- Full ledger ------------------------------------------------------------
 st.divider()
 st.subheader("Ledger")
@@ -137,7 +182,7 @@ df = pd.DataFrame(bets)
 df["CLV%"] = df.apply(lambda r: B.clv_pct(r.get("entry_odds"), r.get("close_odds")), axis=1)
 df["P&L"] = df.apply(lambda r: B.bet_pnl(r), axis=1)
 cols = ["slate_date", "game", "player", "market", "side", "line", "entry_odds", "model_prob",
-        "stake", "book", "close_odds", "CLV%", "result", "P&L"]
+        "stake", "book", "close_odds", "CLV%", "result", "P&L", "ticket"]
 show = df[[c for c in cols if c in df.columns]]
 st.dataframe(
     show.style.format({"model_prob": "{:.2f}", "CLV%": "{:+.1f}", "P&L": "${:+.2f}"}, na_rep="—")
