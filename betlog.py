@@ -43,12 +43,13 @@ CREATE TABLE IF NOT EXISTS bets (
     book       TEXT,
     close_odds INTEGER,
     result     TEXT,
-    notes      TEXT
+    notes      TEXT,
+    ticket     TEXT
 );
 """
 
 _FIELDS = ["ts_placed", "slate_date", "game", "player", "market", "side", "line",
-           "entry_odds", "model_prob", "stake", "book", "close_odds", "result", "notes"]
+           "entry_odds", "model_prob", "stake", "book", "close_odds", "result", "notes", "ticket"]
 
 
 # ===========================================================================
@@ -61,6 +62,10 @@ def _conn(db_path: str = DB_PATH):
     con.row_factory = sqlite3.Row
     try:
         con.executescript(_SCHEMA)
+        # migrate older databases that predate the ticket column
+        cols = [r[1] for r in con.execute("PRAGMA table_info(bets)").fetchall()]
+        if "ticket" not in cols:
+            con.execute("ALTER TABLE bets ADD COLUMN ticket TEXT")
         yield con
         con.commit()
     finally:
@@ -172,3 +177,85 @@ def calibration(bets: List[Dict], n_bins: int = 5) -> List[Dict]:
         out.append({"lo": round(lo, 2), "hi": round(hi, 2),
                     "predicted": round(predicted, 3), "actual": round(actual, 3), "n": len(grp)})
     return out
+
+
+# ===========================================================================
+# PARLAYS — group legs by ticket; compare the parlay to the same money bet straight
+# ===========================================================================
+def _dec_to_american(d: Optional[float]) -> Optional[int]:
+    if not d or d <= 1:
+        return None
+    return int(round((d - 1) * 100)) if d >= 2 else int(round(-100 / (d - 1)))
+
+
+def parlay_decimal(legs: List[Dict]) -> Optional[float]:
+    """Combined decimal odds of a parlay = product of each leg's decimal odds."""
+    d = 1.0
+    for b in legs:
+        if b.get("entry_odds") is None:
+            return None
+        d *= american_to_decimal(b["entry_odds"])
+    return d
+
+
+def parlay_status(legs: List[Dict]) -> str:
+    """'win' only if every leg won; 'loss' if any leg lost; else 'pending'."""
+    res = [(b.get("result") or "").lower() for b in legs]
+    if any(r == "loss" for r in res):
+        return "loss"
+    if legs and all(r == "win" for r in res):
+        return "win"
+    return "pending"
+
+
+def group_tickets(bets: List[Dict]) -> Dict[str, List[Dict]]:
+    """Bucket bets by their ticket tag. Untagged bets (singles) are ignored here."""
+    out: Dict[str, List[Dict]] = {}
+    for b in bets:
+        t = (b.get("ticket") or "").strip()
+        if t:
+            out.setdefault(t, []).append(b)
+    return out
+
+
+def compare_parlay_vs_singles(legs: List[Dict], parlay_stake: float) -> Optional[Dict]:
+    """The teaching tool: parlay outcome vs the SAME total money bet as straight singles.
+
+    Apples-to-apples on risk — parlay_stake on the ticket vs parlay_stake split evenly
+    across the legs as singles. Returns P&L for each path and the difference."""
+    n = len(legs)
+    if n == 0 or not parlay_stake or parlay_stake <= 0:
+        return None
+
+    pdec = parlay_decimal(legs)
+    status = parlay_status(legs)
+    if status == "win" and pdec is not None:
+        parlay_pnl = round(parlay_stake * (pdec - 1), 2)
+    elif status == "loss":
+        parlay_pnl = round(-parlay_stake, 2)
+    else:
+        parlay_pnl = None  # not fully settled yet
+
+    per = parlay_stake / n
+    singles_pnl, settled = 0.0, 0
+    leg_detail = []
+    for b in legs:
+        pnl = bet_pnl({**b, "stake": per})
+        leg_detail.append({"player": b.get("player"), "market": b.get("market"),
+                           "side": b.get("side"), "line": b.get("line"),
+                           "entry_odds": b.get("entry_odds"), "result": b.get("result"),
+                           "pnl": pnl})
+        if pnl is not None:
+            singles_pnl += pnl
+            settled += 1
+    singles_total = round(singles_pnl, 2) if settled == n else None
+
+    return {
+        "n": n, "parlay_decimal": round(pdec, 2) if pdec else None,
+        "parlay_american": _dec_to_american(pdec), "status": status,
+        "parlay_stake": round(parlay_stake, 2), "per_leg_stake": round(per, 2),
+        "parlay_pnl": parlay_pnl, "singles_pnl": singles_total,
+        "difference": (round(singles_total - parlay_pnl, 2)
+                       if (singles_total is not None and parlay_pnl is not None) else None),
+        "legs": leg_detail,
+    }

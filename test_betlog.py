@@ -68,6 +68,46 @@ def test_calibration():
     assert B.calibration([{"model_prob": 0.6, "result": None}], n_bins=5) == []
 
 
+def test_parlay_decimal_and_status():
+    legs = [{"entry_odds": 100, "result": "win"}, {"entry_odds": 100, "result": "win"}]
+    assert abs(B.parlay_decimal(legs) - 4.0) < 1e-9        # 2.0 * 2.0
+    assert B.parlay_status(legs) == "win"
+    legs2 = [{"entry_odds": 100, "result": "win"}, {"entry_odds": 100, "result": "loss"}]
+    assert B.parlay_status(legs2) == "loss"                # any loss -> loss
+    legs3 = [{"entry_odds": 100, "result": "win"}, {"entry_odds": 100, "result": None}]
+    assert B.parlay_status(legs3) == "pending"
+
+
+def test_compare_parlay_vs_singles():
+    # 3 win, 1 loss: parlay busts, singles profit
+    legs = [{"entry_odds": 270, "result": "win"}, {"entry_odds": -120, "result": "win"},
+            {"entry_odds": 115, "result": "win"}, {"entry_odds": -150, "result": "loss"}]
+    c = B.compare_parlay_vs_singles(legs, 20.0)
+    assert c["status"] == "loss" and c["parlay_pnl"] == -20.0
+    assert c["singles_pnl"] > 0                 # the three winners more than cover one $5 loss
+    assert c["difference"] == round(c["singles_pnl"] - c["parlay_pnl"], 2)
+    # all-win: parlay should beat singles (that's the parlay's upside)
+    legs2 = [{"entry_odds": -110, "result": "win"}, {"entry_odds": -110, "result": "win"}]
+    c2 = B.compare_parlay_vs_singles(legs2, 10.0)
+    assert c2["parlay_pnl"] > c2["singles_pnl"]
+    # pending parlay -> no parlay pnl yet
+    assert B.compare_parlay_vs_singles([{"entry_odds": -110, "result": None}], 10.0)["parlay_pnl"] is None
+
+
+def test_group_tickets_and_migration():
+    import tempfile
+    import os
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "bets.db")
+        B.add_bet(db, player="A", entry_odds=-110, ticket="P1", result="win")
+        B.add_bet(db, player="B", entry_odds=120, ticket="P1", result="loss")
+        B.add_bet(db, player="C", entry_odds=-105, ticket="", result="win")   # a single
+        bets = B.list_bets(db)
+        groups = B.group_tickets(bets)
+        assert set(groups.keys()) == {"P1"} and len(groups["P1"]) == 2   # single excluded
+        assert any(b.get("ticket") == "P1" for b in bets)               # ticket column persisted
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     passed = 0
