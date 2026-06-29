@@ -15,6 +15,7 @@ remaining-quota header so the UI can warn you.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -34,7 +35,10 @@ SUPPORTED_MARKETS = [
 
 # ---- odds math -------------------------------------------------------------
 def american_to_decimal(american: float) -> float:
-    return 1 + (american / 100 if american > 0 else 100 / (-american))
+    a = float(american)
+    if a == 0 or not math.isfinite(a):
+        return 1.0  # invalid/zero odds -> no payout (safe sentinel, never divides by zero)
+    return 1 + (a / 100 if a > 0 else 100 / (-a))
 
 
 def implied_prob(american: float) -> float:
@@ -205,15 +209,21 @@ def fetch_slate_props(date_str: str, api_key: str, markets: List[str]) -> Tuple[
 
 # ---- Kelly stake sizing ----------------------------------------------------
 def kelly_fraction(prob: float, american: float) -> float:
-    """Full-Kelly fraction of bankroll for a bet at these odds. 0 if no edge.
+    """Full-Kelly fraction of bankroll for a bet at these odds. 0 if no edge or bad inputs.
 
     f* = (p*d - 1) / (d - 1), where d is decimal odds. This is the stake that maximizes
     long-run bankroll growth IF your probability is exactly right."""
-    d = american_to_decimal(american)
+    try:
+        p, a = float(prob), float(american)
+    except (TypeError, ValueError):
+        return 0.0
+    if not (0.0 < p < 1.0) or not math.isfinite(a) or a == 0:
+        return 0.0  # missing/garbage odds or probability -> no bet
+    d = american_to_decimal(a)
     b = d - 1
     if b <= 0:
         return 0.0
-    return max((prob * d - 1) / b, 0.0)
+    return max((p * d - 1) / b, 0.0)
 
 
 def kelly_stake(prob: float, american: float, bankroll: float,
