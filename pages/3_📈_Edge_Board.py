@@ -317,3 +317,6 @@ with st.expander("How edge is computed (read me)"):
 Line shopping matters: always bet the **best** price (the Book column), since EV swings
 fast with the number. And remember: from a small bankroll, correct sizing means *small*
 bets and slow, bumpy growth — that's the math, not a flaw.
+"""
+    )
+ 
