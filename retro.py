@@ -108,3 +108,91 @@ def homer_report(plays: List[Dict], results: Dict[int, Dict], top_n: int = 15) -
     missed.sort(key=lambda x: x["Rank"])
     return {"caught": caught, "missed": missed, "unprojected": unprojected,
             "cutoff": cutoff, "total_ranked": total}
+
+
+def pitcher_k_report(plays: List[Dict], results: Dict[int, Dict], top_n: int = 15) -> Dict:
+    """Of pitchers who hit strikeout thresholds, where did the model rank them?"""
+    k_plays = sorted([p for p in plays if p["Market"] == "Pitcher Strikeouts"],
+                     key=lambda x: -x["ModelProb"])
+    total = len(k_plays)
+    cutoff = max(top_n, int(total * 0.10))
+    rank_by_pid = {p.get("PlayerId"): (i + 1, p["ModelProb"], p["Player"], p["Line"])
+                   for i, p in enumerate(k_plays)}
+
+    caught, missed, unprojected = [], [], 0
+    for pid, actuals in results.items():
+        k_val = actuals.get("p_k", 0) or 0
+        if k_val < 1:
+            continue
+        if pid in rank_by_pid:
+            rank, prob, name, line = rank_by_pid[pid]
+            # "caught" = actually struck out at or above the line (over bet hit)
+            hit_line = k_val >= line
+            entry = {"Player": name, "K": k_val, "Line": line, "ModelProb": prob,
+                     "Rank": rank, "OfTotal": total, "HitLine": hit_line}
+            (caught if rank <= cutoff else missed).append(entry)
+        else:
+            unprojected += 1
+
+    caught.sort(key=lambda x: x["Rank"])
+    missed.sort(key=lambda x: x["Rank"])
+    return {"caught": caught, "missed": missed, "unprojected": unprojected,
+            "cutoff": cutoff, "total_ranked": total}
+
+
+def batter_tb_report(plays: List[Dict], results: Dict[int, Dict], top_n: int = 15) -> Dict:
+    """Of batters who hit total-bases thresholds, where did the model rank them?"""
+    tb_plays = sorted([p for p in plays if p["Market"] == "Batter Total Bases"],
+                      key=lambda x: -x["ModelProb"])
+    total = len(tb_plays)
+    cutoff = max(top_n, int(total * 0.10))
+    rank_by_pid = {p.get("PlayerId"): (i + 1, p["ModelProb"], p["Player"], p["Line"])
+                   for i, p in enumerate(tb_plays)}
+
+    caught, missed, unprojected = [], [], 0
+    for pid, actuals in results.items():
+        tb_val = actuals.get("tb", 0) or 0
+        if tb_val < 1:
+            continue
+        if pid in rank_by_pid:
+            rank, prob, name, line = rank_by_pid[pid]
+            hit_line = tb_val >= line
+            entry = {"Player": name, "TB": tb_val, "Line": line, "ModelProb": prob,
+                     "Rank": rank, "OfTotal": total, "HitLine": hit_line}
+            (caught if rank <= cutoff else missed).append(entry)
+        else:
+            unprojected += 1
+
+    caught.sort(key=lambda x: x["Rank"])
+    missed.sort(key=lambda x: x["Rank"])
+    return {"caught": caught, "missed": missed, "unprojected": unprojected,
+            "cutoff": cutoff, "total_ranked": total}
+
+
+def batter_hits_report(plays: List[Dict], results: Dict[int, Dict], top_n: int = 15) -> Dict:
+    """Of batters who got hits, where did the model rank them?"""
+    hit_plays = sorted([p for p in plays if p["Market"] == "Batter Total Hits"],
+                       key=lambda x: -x["ModelProb"])
+    total = len(hit_plays)
+    cutoff = max(top_n, int(total * 0.10))
+    rank_by_pid = {p.get("PlayerId"): (i + 1, p["ModelProb"], p["Player"], p["Line"])
+                   for i, p in enumerate(hit_plays)}
+
+    caught, missed, unprojected = [], [], 0
+    for pid, actuals in results.items():
+        h_val = actuals.get("hits", 0) or 0
+        if h_val < 1:
+            continue
+        if pid in rank_by_pid:
+            rank, prob, name, line = rank_by_pid[pid]
+            hit_line = h_val >= line
+            entry = {"Player": name, "Hits": h_val, "Line": line, "ModelProb": prob,
+                     "Rank": rank, "OfTotal": total, "HitLine": hit_line}
+            (caught if rank <= cutoff else missed).append(entry)
+        else:
+            unprojected += 1
+
+    caught.sort(key=lambda x: x["Rank"])
+    missed.sort(key=lambda x: x["Rank"])
+    return {"caught": caught, "missed": missed, "unprojected": unprojected,
+            "cutoff": cutoff, "total_ranked": total}
