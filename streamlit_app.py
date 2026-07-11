@@ -1,37 +1,42 @@
 """
-Entry point for the H2 Sports MLB dashboard.
-
-Streamlit 1.4x+ deprecated the automatic `pages/` folder discovery in favor of the explicit
-st.navigation API. On recent versions the old auto-discovery can reset navigation to the entry
-page on every rerun (the "jumps back to Home on any click" bug). Declaring the pages explicitly
-here fixes that — navigation state is stable across reruns.
-
+Entry point for the H2 Sports MLB dashboard (explicit st.navigation).
+ 
+Each page is given a STABLE, clean url_path so navigation state round-trips across reruns even
+though the page filenames contain emoji. Without an explicit url_path, Streamlit derives the slug
+from the (emoji-escaped) filename, which can fail to match on rerun and silently fall back to the
+default page (Home) — the "every click goes back to Home" bug.
+ 
 DEPLOY NOTE: set the app's "Main file path" to  streamlit_app.py  (not Home.py).
-set_page_config is called ONCE here and applies to every page; the individual page files no
-longer call it.
 """
-
+ 
 import streamlit as st
 from pathlib import Path
-
+ 
 st.set_page_config(page_title="H2 Sports MLB Dashboard", page_icon="⚾", layout="wide")
-
+ 
 _HERE = Path(__file__).parent
-_PAGES_DIR = _HERE / "views"
-
-# Clean titles + icons keyed by the page-file's leading number, so the sidebar looks right no
-# matter how the emoji in the filenames are encoded on disk.
+_VIEWS = _HERE / "views"
+ 
+# leading-digit -> (title, icon, stable url slug). The url_path is the key fix: it pins each
+# page to a predictable URL so reruns keep you on the same page instead of defaulting to Home.
 _META = {
-    "0": ("Command Center", "🏆"), "1": ("Pitching Lab", "🎯"), "2": ("Dinger Engine", "💣"),
-    "3": ("Edge Board", "📈"),      "4": ("Bet Log", "📒"),      "5": ("Best Bets", "⭐"),
-    "6": ("Retrospective", "🔍"),   "7": ("Media Room", "📣"),   "8": ("Podcast Studio", "🎙️"),
-    "9": ("Track Record", "📊"),
+    "0": ("Command Center", "🏆", "command_center"),
+    "1": ("Pitching Lab",   "🎯", "pitching_lab"),
+    "2": ("Dinger Engine",  "💣", "dinger_engine"),
+    "3": ("Edge Board",     "📈", "edge_board"),
+    "4": ("Bet Log",        "📒", "bet_log"),
+    "5": ("Best Bets",      "⭐", "best_bets"),
+    "6": ("Retrospective",  "🔍", "retrospective"),
+    "7": ("Media Room",     "📣", "media_room"),
+    "8": ("Podcast Studio", "🎙️", "podcast_studio"),
+    "9": ("Track Record",   "📊", "track_record"),
 }
-
-# Home landing first (default), then the numbered pages in order.
-pages = [st.Page(str(_HERE / "Home.py"), title="Home", icon="⚾", default=True)]
-for f in sorted(_PAGES_DIR.glob("*.py")):
-    title, icon = _META.get(f.name[0], (f.stem, "📄"))
-    pages.append(st.Page(str(f), title=title, icon=icon))
-
+ 
+# Home is the landing page but NOT a forced default fallback (default= is intentionally omitted,
+# so a rerun on any other page stays on that page).
+pages = [st.Page(str(_HERE / "Home.py"), title="Home", icon="⚾", url_path="home")]
+for f in sorted(_VIEWS.glob("*.py")):
+    title, icon, slug = _META.get(f.name[0], (f.stem, "📄", f"page_{f.name[0]}"))
+    pages.append(st.Page(str(f), title=title, icon=icon, url_path=slug))
+ 
 st.navigation(pages).run()
