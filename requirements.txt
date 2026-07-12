@@ -1,18 +1,16 @@
-# Wheel-friendly pins for Streamlit Cloud. IMPORTANT: also set Python to 3.11 in the app's
-# Advanced settings (and runtime.txt). On Python 3.14 there are no prebuilt wheels for these,
-# so pip tries to COMPILE from source and the boot segfaults. On 3.11 every one installs from
-# a prebuilt wheel.
-#
-# psycopg2-binary and the data stack are left with >= (not ==) so pip can always grab a version
-# that HAS a wheel for the running Python, instead of being forced to build one specific version
-# from source.
-
+# Fully pinned for stable Streamlit Cloud deploys. Pair with Python 3.11 (set in the app's
+# Advanced settings). The unpinned scientific/C packages kept going bleeding-edge and crashing:
+# a pyarrow/matplotlib segfault while rendering the Best Bets dataframe (both are compiled C libs
+# that Streamlit's st.dataframe + Styler.background_gradient depend on). Pinning them to stable,
+# widely-used versions fixes it.
+ 
 streamlit==1.59.1
-pandas>=2.0,<3
-numpy>=1.24,<2
-requests>=2.31
-pytz>=2023.3
-matplotlib>=3.7
-plotly>=5.18
-pybaseball>=2.2
-psycopg2-binary>=2.9
+pandas==2.2.3
+numpy==1.26.4
+pyarrow==16.1.0          # st.dataframe serialization — 25.x segfaulted; 16.x is stable
+matplotlib==3.9.2        # Styler.background_gradient colormaps — 3.11 was bleeding-edge
+plotly==5.24.1           # Track Record / Command Center charts
+requests==2.32.3
+pytz==2024.2
+pybaseball==2.2.7
+psycopg2-binary==2.9.9
