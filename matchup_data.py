@@ -1,42 +1,44 @@
 """
 matchup_data.py — pitch-level "arsenal vs. vulnerability" layer for the Matchup Lab.
-
+ 
 WHY: season rate stats tell you a hitter is good or bad overall; pitch-level data tells you
 *how* to get him out — which pitch types he whiffs on and which he punishes. Pairing a pitcher's
 arsenal (what he throws, how much he misses bats with it) against a hitter's per-pitch-family
 performance surfaces the specific pitches to attack with. That's the edge behind pitch-level props.
-
+ 
 ARCHITECTURE (mirrors statcast_data.py): pitch-level Savant pulls are enormous and slow, so a
 nightly job (refresh_matchups.py / a GitHub Action) pulls a full season, aggregates into two
 compact tables, and writes them to data/. The dashboard reads those instantly and never blocks
 on Savant. pybaseball is imported ONLY inside refresh(), so the app runs fine without it.
-
+ 
 DESIGN CHOICES:
   * Pitcher arsenal is aggregated by SPECIFIC pitch type (FF, SL, CH ...) — that's his repertoire.
   * Hitter performance is aggregated by pitch FAMILY (Fastball / Breaking / Offspeed) — a single
     pitch type is often too thin per hitter to trust; families stabilize the sample.
   * The matchup score is a TRANSPARENT scouting heuristic (see matchup_score), NOT a probability.
-
+ 
 Pure NumPy/pandas. The aggregation functions take a plain pitch DataFrame so they can be unit
 tested with mock data shaped like real Statcast, without touching the network.
 """
-
+ 
 from __future__ import annotations
-
+ 
 import os
 from typing import Dict, List, Optional, Tuple
-
+ 
 import numpy as np
 import pandas as pd
-
+ 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 ARSENAL_PATH = os.path.join(DATA_DIR, "pitcher_arsenals.csv")
 HITTER_PATH = os.path.join(DATA_DIR, "hitter_pitch_splits.csv")
-
+HITTER_TYPE_PATH = os.path.join(DATA_DIR, "hitter_pitch_type_splits.csv")
+ 
 # Minimum pitches to trust an aggregate (below this, a rate is too noisy to show without a caveat).
 MIN_PITCHES_ARSENAL = 30       # a pitch is "in the arsenal" only if thrown at least this often
 MIN_PITCHES_FAMILY = 40        # a hitter's vs-family rate needs at least this many pitches
-
+MIN_PITCHES_TYPE = 25          # a hitter's vs-specific-pitch rate (noisier) floor to appear at all
+ 
 # Map Statcast pitch_type codes to families. Unlisted codes -> "Other".
 PITCH_FAMILY = {
     "FF": "Fastball", "FA": "Fastball", "SI": "Fastball", "FT": "Fastball", "FC": "Fastball",
@@ -50,9 +52,9 @@ PITCH_NAME = {
     "SL": "Slider", "CU": "Curveball", "KC": "Knuckle-Curve", "ST": "Sweeper", "SV": "Slurve",
     "CH": "Changeup", "FS": "Splitter", "FO": "Forkball", "KN": "Knuckleball",
 }
-
+ 
 FAMILIES = ["Fastball", "Breaking", "Offspeed"]
-
+ 
 # Statcast `description` values that count as a swing, and the subset that are whiffs.
 _SWING_DESCS = {"swinging_strike", "swinging_strike_blocked", "foul", "foul_tip",
                 "hit_into_play", "foul_bunt", "missed_bunt", "bunt_foul_tip"}
@@ -65,8 +67,8 @@ _AB_EVENTS = {"single", "double", "triple", "home_run", "field_out", "strikeout"
               "grounded_into_double_play", "force_out", "double_play", "field_error",
               "fielders_choice", "fielders_choice_out", "strikeout_double_play",
               "triple_play", "sac_fly_double_play"}
-
-
+ 
+ 
 # --------------------------------------------------------------------- helpers
 def _col(df: pd.DataFrame, *names, fill=np.nan) -> pd.Series:
     """First matching column as a Series, else a fill-value Series (drift-safe)."""
@@ -74,18 +76,18 @@ def _col(df: pd.DataFrame, *names, fill=np.nan) -> pd.Series:
         if n in df.columns:
             return df[n]
     return pd.Series(fill, index=df.index)
-
-
+ 
+ 
 def _swing_whiff(desc: pd.Series) -> Tuple[pd.Series, pd.Series]:
     """(is_swing, is_whiff) boolean Series from a `description` column."""
     d = desc.astype("string").fillna("")
     return d.isin(_SWING_DESCS), d.isin(_WHIFF_DESCS)
-
-
+ 
+ 
 # --------------------------------------------------------------------- pitcher arsenal
 def build_pitcher_arsenal(pitches: pd.DataFrame) -> pd.DataFrame:
     """One row per (pitcher, pitch_type): usage%, whiff%, put-away%, avg velo, count.
-
+ 
     `pitches` is raw pitch-level Statcast (many pitchers OK). Pure — no network."""
     if pitches is None or len(pitches) == 0:
         return pd.DataFrame(columns=["pitcher", "pitch_type", "pitch_name", "family",
@@ -101,7 +103,7 @@ def build_pitcher_arsenal(pitches: pd.DataFrame) -> pd.DataFrame:
     df["_velo"] = pd.to_numeric(_col(df, "release_speed"), errors="coerce")
     strikes = pd.to_numeric(_col(df, "strikes"), errors="coerce").fillna(0)
     df["_two_strk"] = (strikes >= 2).values
-
+ 
     total_by_pitcher = df.groupby("_pid").size().rename("_tot")
     rows = []
     for (pid, ptype), g in df.groupby(["_pid", "_ptype"]):
@@ -128,12 +130,12 @@ def build_pitcher_arsenal(pitches: pd.DataFrame) -> pd.DataFrame:
     if len(out):
         out = out.sort_values(["pitcher", "usage"], ascending=[True, False])
     return out
-
-
+ 
+ 
 # --------------------------------------------------------------------- hitter splits
 def build_hitter_splits(pitches: pd.DataFrame) -> pd.DataFrame:
     """One row per (batter, family): whiff%, SLG-against, xwOBA-against, count.
-
+ 
     Aggregated by pitch family (Fastball/Breaking/Offspeed) for a stable per-hitter sample."""
     cols = ["batter", "family", "pitches", "whiff", "slg", "xwoba"]
     if pitches is None or len(pitches) == 0:
@@ -151,7 +153,7 @@ def build_hitter_splits(pitches: pd.DataFrame) -> pd.DataFrame:
     df["_tb"] = events.map(_TB_BY_EVENT).fillna(0).astype(float).values
     df["_ab"] = events.isin(_AB_EVENTS).values
     df["_xwoba"] = pd.to_numeric(_col(df, "estimated_woba_using_speedangle"), errors="coerce")
-
+ 
     rows = []
     for (bid, fam), g in df.groupby(["_bid", "_family"]):
         n = len(g)
@@ -170,24 +172,72 @@ def build_hitter_splits(pitches: pd.DataFrame) -> pd.DataFrame:
             "xwoba": float(np.nanmean(g["_xwoba"])) if g["_xwoba"].notna().any() else 0.0,
         })
     return pd.DataFrame(rows, columns=cols)
-
-
+ 
+ 
+# --------------------------------------------------------------------- hitter splits by pitch type
+def build_hitter_pitch_type_splits(pitches: pd.DataFrame) -> pd.DataFrame:
+    """One row per (batter, SPECIFIC pitch_type): whiff%, SLG-against, xwOBA-against, count.
+ 
+    Same math as build_hitter_splits but by individual pitch (4-Seam, Slider, Curveball ...) rather
+    than family — more granular, but noisier per hitter, so it uses a higher pitch floor
+    (MIN_PITCHES_TYPE) and always carries the pitch count so a thin sample is visible, not hidden."""
+    cols = ["batter", "pitch_type", "pitch_name", "family", "pitches", "whiff", "slg", "xwoba"]
+    if pitches is None or len(pitches) == 0:
+        return pd.DataFrame(columns=cols)
+    df = pitches.copy()
+    df["_bid"] = pd.to_numeric(_col(df, "batter"), errors="coerce")
+    df["_ptype"] = _col(df, "pitch_type").astype("string").fillna("")
+    df = df.dropna(subset=["_bid"])
+    df = df[df["_ptype"] != ""]
+    swing, whiff = _swing_whiff(_col(df, "description"))
+    df["_swing"] = swing.values
+    df["_whiff"] = whiff.values
+    events = _col(df, "events").astype("string").fillna("")
+    df["_tb"] = events.map(_TB_BY_EVENT).fillna(0).astype(float).values
+    df["_ab"] = events.isin(_AB_EVENTS).values
+    df["_xwoba"] = pd.to_numeric(_col(df, "estimated_woba_using_speedangle"), errors="coerce")
+ 
+    rows = []
+    for (bid, ptype), g in df.groupby(["_bid", "_ptype"]):
+        n = len(g)
+        if n < MIN_PITCHES_TYPE:
+            continue
+        swings = int(g["_swing"].sum())
+        whiffs = int(g["_whiff"].sum())
+        abs_ = int(g["_ab"].sum())
+        tb = float(g["_tb"].sum())
+        rows.append({
+            "batter": int(bid),
+            "pitch_type": ptype,
+            "pitch_name": PITCH_NAME.get(ptype, ptype),
+            "family": PITCH_FAMILY.get(ptype, "Other"),
+            "pitches": n,
+            "whiff": (whiffs / swings) if swings else 0.0,
+            "slg": (tb / abs_) if abs_ else 0.0,
+            "xwoba": float(np.nanmean(g["_xwoba"])) if g["_xwoba"].notna().any() else 0.0,
+        })
+    out = pd.DataFrame(rows, columns=cols)
+    if len(out):
+        out = out.sort_values(["batter", "pitches"], ascending=[True, False])
+    return out
+ 
+ 
 # --------------------------------------------------------------------- matchup score
 def matchup_score(pitcher_whiff: float, hitter_whiff: float, hitter_slg: float) -> float:
     """Transparent scouting heuristic: how good a weapon is this pitch vs this hitter?
-
+ 
     High when the pitcher misses bats with it AND the hitter both whiffs at it and does little
     damage against that family. Range roughly 0-1+. NOT a probability — a sortable edge signal.
-
+ 
         score = pitcher_whiff * (0.6 * hitter_whiff + 0.4 * (1 - clamp(hitter_slg / 0.550)))
-
+ 
     hitter_slg is normalized against a .550 "strong SLG" anchor so low-damage families score high.
     """
     slg_norm = min(max(hitter_slg / 0.550, 0.0), 1.0)
     hitter_vuln = 0.6 * hitter_whiff + 0.4 * (1.0 - slg_norm)
     return round(max(pitcher_whiff, 0.0) * hitter_vuln, 4)
-
-
+ 
+ 
 def build_matchup(pitcher_id: int, hitter_id: int,
                   arsenals: Dict[int, List[Dict]], hitter_splits: Dict[int, Dict[str, Dict]]
                   ) -> List[Dict]:
@@ -217,37 +267,40 @@ def build_matchup(pitcher_id: int, hitter_id: int,
         })
     rows.sort(key=lambda r: (r["score"] is not None, r["score"] or 0), reverse=True)
     return rows
-
-
+ 
+ 
 # --------------------------------------------------------------------- refresh (network)
-def refresh(year: int, arsenal_path: str = ARSENAL_PATH, hitter_path: str = HITTER_PATH
-            ) -> Tuple[str, str]:
-    """Pull a full season of pitch-level Statcast, aggregate, and write both compact CSVs.
-
+def refresh(year: int, arsenal_path: str = ARSENAL_PATH, hitter_path: str = HITTER_PATH,
+            hitter_type_path: str = HITTER_TYPE_PATH) -> Tuple[str, str, str]:
+    """Pull a full season of pitch-level Statcast, aggregate, and write the compact CSVs.
+ 
     HEAVY: this pulls the whole league's pitches for the season (chunked by day inside
-    pybaseball). Run it in a scheduled job (GitHub Action), never in the app. Returns the two
+    pybaseball). Run it in a scheduled job (GitHub Action), never in the app. Returns the three
     paths written. Column names occasionally drift between pybaseball versions; the aggregation
     is drift-tolerant, but verify the printed row counts look sane."""
     from pybaseball import statcast
-
+ 
     start, end = f"{year}-03-01", f"{year}-11-30"
     pitches = statcast(start_dt=start, end_dt=end)      # all pitches, all games in range
     if pitches is None or len(pitches) == 0:
         raise ValueError(f"Savant returned no pitches for {start}..{end}")
-
+ 
     arsenal = build_pitcher_arsenal(pitches)
     hitters = build_hitter_splits(pitches)
+    hitter_types = build_hitter_pitch_type_splits(pitches)
     if arsenal.empty or hitters.empty:
         raise ValueError("aggregation produced empty tables — check pitch_type/description columns")
-
+ 
     os.makedirs(DATA_DIR, exist_ok=True)
     arsenal.to_csv(arsenal_path, index=False)
     hitters.to_csv(hitter_path, index=False)
+    hitter_types.to_csv(hitter_type_path, index=False)
     print(f"Wrote {len(arsenal)} arsenal rows -> {arsenal_path}")
-    print(f"Wrote {len(hitters)} hitter-split rows -> {hitter_path}")
-    return arsenal_path, hitter_path
-
-
+    print(f"Wrote {len(hitters)} hitter-family rows -> {hitter_path}")
+    print(f"Wrote {len(hitter_types)} hitter-pitch-type rows -> {hitter_type_path}")
+    return arsenal_path, hitter_path, hitter_type_path
+ 
+ 
 # --------------------------------------------------------------------- load (fast)
 def load(arsenal_path: str = ARSENAL_PATH, hitter_path: str = HITTER_PATH
          ) -> Tuple[Dict[int, List[Dict]], Dict[int, Dict[str, Dict]]]:
@@ -257,7 +310,7 @@ def load(arsenal_path: str = ARSENAL_PATH, hitter_path: str = HITTER_PATH
     Returns ({}, {}) if the cache files are missing — callers must treat this layer as optional."""
     arsenals: Dict[int, List[Dict]] = {}
     hitter_splits: Dict[int, Dict[str, Dict]] = {}
-
+ 
     if os.path.exists(arsenal_path):
         try:
             a = pd.read_csv(arsenal_path)
@@ -271,7 +324,7 @@ def load(arsenal_path: str = ARSENAL_PATH, hitter_path: str = HITTER_PATH
                 })
         except Exception:
             pass
-
+ 
     if os.path.exists(hitter_path):
         try:
             h = pd.read_csv(hitter_path)
@@ -283,5 +336,27 @@ def load(arsenal_path: str = ARSENAL_PATH, hitter_path: str = HITTER_PATH
                 }
         except Exception:
             pass
-
+ 
     return arsenals, hitter_splits
+ 
+ 
+def load_hitter_types(path: str = HITTER_TYPE_PATH) -> Dict[int, List[Dict]]:
+    """Read the by-specific-pitch hitter table into a fast lookup:
+        hitter_types[batter_id] -> [ {pitch_type, pitch_name, family, pitches, whiff, slg, xwoba}, ... ]
+    Sorted most-seen pitch first. Returns {} if the file is missing (page treats it as optional)."""
+    out: Dict[int, List[Dict]] = {}
+    if not os.path.exists(path):
+        return out
+    try:
+        t = pd.read_csv(path)
+        for r in t.itertuples(index=False):
+            d = r._asdict()
+            out.setdefault(int(d["batter"]), []).append({
+                "pitch_type": d.get("pitch_type"), "pitch_name": d.get("pitch_name"),
+                "family": d.get("family"), "pitches": int(d.get("pitches", 0) or 0),
+                "whiff": float(d.get("whiff", 0) or 0), "slg": float(d.get("slg", 0) or 0),
+                "xwoba": float(d.get("xwoba", 0) or 0),
+            })
+    except Exception:
+        pass
+    return out
