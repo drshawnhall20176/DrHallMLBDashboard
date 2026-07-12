@@ -386,7 +386,8 @@ def build_pitching_slate(date_str: str, fip_constant: float = FIP_CONSTANT_DEFAU
         if pm.id is None or pm.era == 0:
             continue
         rows.append({
-            "Pitcher": pm.name, "Team": team, "Opponent": opp, "Game": label, "Hand": pm.hand,
+            "Pitcher": pm.name, "_pid": pm.id, "Team": team, "Opponent": opp, "Game": label,
+            "Hand": pm.hand,
             "ERA": round(pm.era, 2), "FIP": pm.fip, "Delta": round(pm.era - pm.fip, 2),
             "K/9": round(pm.k9, 1), "WHIP": round(pm.whip, 2), "HR/9": round(pm.hr9, 2), "OBA": pm.oba,
         })

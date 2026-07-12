@@ -3,7 +3,7 @@
 # a pyarrow/matplotlib segfault while rendering the Best Bets dataframe (both are compiled C libs
 # that Streamlit's st.dataframe + Styler.background_gradient depend on). Pinning them to stable,
 # widely-used versions fixes it.
- 
+
 streamlit==1.59.1
 pandas==2.2.3
 numpy==1.26.4
