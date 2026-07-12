@@ -1,14 +1,18 @@
-# Pinned for stable, reproducible deploys on Streamlit Cloud.
-# Root-cause of prior breakages: the platform silently moving to bleeding-edge Streamlit (1.59,
-# broke navigation) and Python (3.14, no wheels for the data stack -> boot loop). Pinning both
-# stops the platform from moving under us. Use with runtime.txt -> python-3.11.
+# Wheel-friendly pins for Streamlit Cloud. IMPORTANT: also set Python to 3.11 in the app's
+# Advanced settings (and runtime.txt). On Python 3.14 there are no prebuilt wheels for these,
+# so pip tries to COMPILE from source and the boot segfaults. On 3.11 every one installs from
+# a prebuilt wheel.
+#
+# psycopg2-binary and the data stack are left with >= (not ==) so pip can always grab a version
+# that HAS a wheel for the running Python, instead of being forced to build one specific version
+# from source.
 
-streamlit==1.59.1        # the version where navigation now works (with per-page url_path)
-pandas==2.2.3
-numpy==1.26.4
-requests==2.32.3
-pytz==2024.2
-matplotlib==3.9.2
-plotly==5.24.1
-pybaseball==2.2.7
-psycopg2-binary==2.9.9
+streamlit==1.59.1
+pandas>=2.0,<3
+numpy>=1.24,<2
+requests>=2.31
+pytz>=2023.3
+matplotlib>=3.7
+plotly>=5.18
+pybaseball>=2.2
+psycopg2-binary>=2.9
