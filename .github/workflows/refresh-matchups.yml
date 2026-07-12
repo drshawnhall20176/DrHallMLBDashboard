@@ -1,0 +1,49 @@
+name: refresh-matchups
+
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pybaseball pandas numpy
+
+      - name: Pull pitch-level Statcast and build the matchup tables
+        run: python refresh_matchups.py
+
+      - name: Validate the cache with the app's own loader
+        run: |
+          python - <<'PY'
+          import sys
+          import matchup_data as MD
+          arsenals, splits = MD.load()
+          print(f"Loaded {len(arsenals)} pitchers, {len(splits)} hitters")
+          if len(arsenals) < 50 or len(splits) < 50:
+              print("Tables look empty or invalid — refusing to commit.")
+              sys.exit(1)
+          PY
+
+      - name: Commit the refreshed tables (only if they changed)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/pitcher_arsenals.csv data/hitter_pitch_splits.csv
+          if git diff --staged --quiet; then
+            echo "No change in matchup tables — nothing to commit."
+          else
+            git commit -m "Auto-refresh matchup cache ($(date -u +%Y-%m-%d))"
+            git push
+          fi
